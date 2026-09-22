@@ -103,3 +103,17 @@ def test_all_required_alarm_types_can_be_injected(client):
         assert response.status_code == 200, alarm_type
         assert response.json()["alarmType"] == alarm_type
         assert response.json()["status"] == "OCCURRING"
+
+
+def test_compiled_frontend_and_spa_routes_are_served(client):
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "CER Test Portal" in root.text
+
+    spa_route = client.get("/devices/device-test-001")
+    assert spa_route.status_code == 200
+    assert "CER Test Portal" in spa_route.text
+
+    missing_api = client.get("/api/not-a-real-route")
+    assert missing_api.status_code == 404
+    assert missing_api.headers["content-type"].startswith("application/json")

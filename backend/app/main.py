@@ -1,8 +1,11 @@
 import os
 from datetime import date
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .models import (
     Alarm,
@@ -200,6 +203,29 @@ def create_app(database_path: str | None = None, transition_delay: float | None 
     @app.get("/api/admin/events", response_model=list[AuditEvent])
     def events() -> list[AuditEvent]:
         return store.events()
+
+    # The production React bundle is committed so constrained target VMs need
+    # only Python. API routes are registered first and remain authoritative.
+    default_frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    frontend_dir = Path(os.getenv("CER_FRONTEND_DIR", str(default_frontend))).resolve()
+    index_file = frontend_dir / "index.html"
+    assets_dir = frontend_dir / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
+
+    @app.get("/", include_in_schema=False)
+    def frontend_index():
+        if not index_file.is_file():
+            raise HTTPException(status_code=503, detail="Compiled frontend assets are unavailable")
+        return FileResponse(index_file)
+
+    @app.get("/{frontend_path:path}", include_in_schema=False)
+    def frontend_spa(frontend_path: str):
+        if frontend_path == "api" or frontend_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        if not index_file.is_file():
+            raise HTTPException(status_code=503, detail="Compiled frontend assets are unavailable")
+        return FileResponse(index_file)
 
     return app
 

@@ -10,12 +10,54 @@ credentials, proprietary portal code or assets, external energy-service calls,
 device discovery, or physical inverter control. The supplied screenshots were
 used only as layout and workflow references.
 
-## Quick start with Docker
+## Lightweight deployment without Docker
+
+This is the recommended mode for a constrained research VM. At runtime the
+portal is one FastAPI process on one port: FastAPI serves both `/api/*` and the
+committed React production bundle. The target needs Python and pip, but does not
+need Docker, WSL, Node.js, npm, Nginx, or a database server.
+
+Linux:
+
+```bash
+git clone https://github.com/The-AnhTa/semsplus-local-emulator.git
+cd semsplus-local-emulator
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-runtime.txt
+chmod +x scripts/run-local.sh
+./scripts/run-local.sh
+```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/The-AnhTa/semsplus-local-emulator.git
+Set-Location semsplus-local-emulator
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-runtime.txt
+.\scripts\run-local.ps1
+```
+
+Open [http://localhost:8080](http://localhost:8080) and sign in with:
+
+```text
+Email:    researcher@example.local
+Password: test-password
+```
+
+The scripts store SQLite data in `data/cer-emulator.db` by default. Override
+`CER_DATA_DIR`, `CER_DATABASE_PATH`, `CER_HOST`, or `CER_PORT` when needed. The
+compiled files under `frontend/dist/` are versioned deliberately so a fresh
+clone does not need a frontend build on the target VM.
+
+## Docker deployment
 
 Prerequisite: Docker with the Compose plugin.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/The-AnhTa/semsplus-local-emulator.git
 cd semsplus-local-emulator
 docker compose up --build
 ```
@@ -27,8 +69,8 @@ Email:    researcher@example.local
 Password: test-password
 ```
 
-Docker is the recommended deployment path for a Linux VM. Node and Python are
-not required on the host. Simulator data persists in the `cer-data` volume.
+Docker remains a supported alternative. Node and Python are not required on the
+host in this mode. Simulator data persists in the `cer-data` volume.
 
 To stop the stack:
 
@@ -61,14 +103,16 @@ keeps experiment setup separate from the agent-facing target.
 
 ```mermaid
 flowchart LR
-    U[Researcher or browser agent] -->|HTTP :8080| N[Nginx + React UI]
-    N -->|/api REST/JSON| F[FastAPI simulator]
+    U[Researcher or browser agent] -->|HTTP :8080| F[FastAPI simulator]
+    F -->|/| R[Compiled React assets]
+    F -->|/api| A[Typed API routes]
     F --> S[(SQLite state and audit log)]
     H[Experiment harness] -->|Scenario/reset API| F
     P[Future policy broker] -. can sit in front of browser control .-> U
 ```
 
-The React application is served by Nginx, which proxies `/api` to FastAPI.
+In lightweight mode FastAPI serves the React bundle and API itself. Docker mode
+keeps Nginx as a dedicated static server and reverse proxy. In both modes,
 FastAPI owns all transition validation; the frontend never decides whether a
 mutation is legal. See [architecture details](docs/architecture.md).
 
@@ -155,6 +199,13 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
+Test the production bundle and all browser workflows through the single FastAPI
+process, with no Vite or Nginx server:
+
+```bash
+npm run test:e2e:single
+```
+
 Full container build:
 
 ```bash
@@ -165,10 +216,11 @@ docker compose build
 
 ```text
 backend/                 FastAPI app, state machine, SQLite store, pytest tests
-frontend/                React/TypeScript UI and Playwright tests
+frontend/                React UI, committed production bundle, browser tests
 docs/reference-ui/       User-supplied workflow/layout references only
 docs/                    Architecture, API, simulator, and threat-testing notes
-scripts/                 Reset helpers
+scripts/                 Native launchers and reset helpers
+requirements-runtime.txt Minimal single-process Python dependencies
 docker-compose.yml       Complete local deployment on port 8080
 AGENTS.md                Repository safety and engineering constraints
 PLAN.md                  Phased implementation checklist
@@ -186,4 +238,3 @@ AI agent -> browser -> policy broker -> browser control -> CER Test Portal
 
 The emulator is the system under control; policy enforcement and experiment
 orchestration belong in separate projects. See [threat-testing guidance](docs/threat-testing.md).
-

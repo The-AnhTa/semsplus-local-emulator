@@ -1,6 +1,6 @@
 # Architecture
 
-## Components
+## Lightweight single-process deployment
 
 ```mermaid
 flowchart TB
@@ -8,9 +8,9 @@ flowchart TB
       B[Browser]
       R[React + TypeScript]
     end
-    subgraph Emulator[Local emulator boundary]
-      N[Nginx static server]
-      A[FastAPI REST API]
+    subgraph Emulator[One Python process on port 8080]
+      A[FastAPI]
+      S[Committed React production assets]
       M[State machine]
       T[Synthetic telemetry engine]
       D[(SQLite)]
@@ -18,8 +18,10 @@ flowchart TB
     X[External energy services]:::blocked
     I[Physical inverter]:::blocked
 
-    B --> R --> N
-    N -->|/api| A
+    B --> R
+    R -->|/ and /assets| A
+    A --> S
+    R -->|/api| A
     A --> M
     A --> T
     M --> D
@@ -29,9 +31,17 @@ flowchart TB
     classDef blocked fill:#341b20,stroke:#ff5d67,color:#ffabb0
 ```
 
-The production Compose deployment exposes only Nginx on host port 8080. The
-backend is addressable inside the Compose network but is not published on a host
-port. Nginx serves the built single-page app and proxies `/api` requests.
+This is the preferred constrained-VM layout. `scripts/run-local.sh` and
+`scripts/run-local.ps1` start Uvicorn with the backend module path configured.
+FastAPI serves the versioned `frontend/dist` bundle, including fallback routing
+for browser-side URLs, and owns `/api` routes on the same origin. SQLite remains
+a local file. No frontend toolchain or reverse proxy is needed at runtime.
+
+## Docker deployment
+
+The existing Compose deployment remains available. It exposes Nginx on host
+port 8080; the backend is reachable only inside the Compose network. Nginx
+serves the same frontend build and proxies `/api` requests to FastAPI.
 
 ## Backend boundaries
 
@@ -54,7 +64,7 @@ vendor integration code.
 
 ## Persistence
 
-The initial data set is one station and one device. Docker stores the SQLite file
-in the `cer-data` named volume. `POST /api/admin/reset` clears mutable records and
-reseeds the same identifiers and baseline values.
-
+The initial data set is one station and one device. Native launchers store the
+database in `data/cer-emulator.db`; Docker uses the `cer-data` named volume.
+`POST /api/admin/reset` clears mutable records and reseeds the same identifiers
+and baseline values.

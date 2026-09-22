@@ -74,3 +74,10 @@ with generic branding, synthetic data, and no copied proprietary assets.
 - [x] Frontend tests and production build pass.
 - [x] Playwright tests pass.
 - [ ] Docker Compose build passes.
+
+## Lightweight deployment extension
+
+- [x] Serve the compiled React bundle and SPA routes from FastAPI.
+- [x] Add minimal Python runtime requirements and native Linux/Windows launchers.
+- [x] Keep compiled frontend assets available in a fresh clone.
+- [x] Pass backend, frontend, and single-process Playwright verification.

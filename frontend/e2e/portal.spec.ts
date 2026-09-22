@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 async function reset(request: import("@playwright/test").APIRequestContext) {
-  const response = await request.post("http://127.0.0.1:8000/api/admin/reset");
+  const response = await request.post("/api/admin/reset");
   expect(response.ok()).toBeTruthy();
 }
 
@@ -39,7 +39,7 @@ test("login, navigate, stop and start device, then open Alarm Center", async ({ 
 });
 
 test("grid overvoltage scenario creates a consistent alarm and device state", async ({ page, request }) => {
-  const scenario = await request.post("http://127.0.0.1:8000/api/admin/scenario", {
+  const scenario = await request.post("/api/admin/scenario", {
     data: { scenario: "GRID_OVERVOLTAGE" },
   });
   expect(scenario.ok()).toBeTruthy();
@@ -53,8 +53,8 @@ test("grid overvoltage scenario creates a consistent alarm and device state", as
   await expect(page.getByTestId("device-status")).toContainText("Fault");
   await expect(page.getByText("0.00", { exact: true }).first()).toBeVisible();
 
-  const telemetry = await request.get("http://127.0.0.1:8000/api/devices/device-test-001/telemetry");
+  const telemetry = await request.get("/api/devices/device-test-001/telemetry");
   expect(telemetry.ok()).toBeTruthy();
   expect((await telemetry.json()).phaseAVoltage).toBe(262);
-  expect((await (await request.get("http://127.0.0.1:8000/api/devices/device-test-001/telemetry")).json()).activePowerKw).toBe(0);
+  expect((await (await request.get("/api/devices/device-test-001/telemetry")).json()).activePowerKw).toBe(0);
 });
