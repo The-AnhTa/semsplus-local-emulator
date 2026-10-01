@@ -26,7 +26,7 @@ flowchart TB
     A --> T
     M --> D
     T --> D
-    A -. optional wake notification .-> O[OpenClaw Gateway]
+    A -. best-effort CLI notification .-> O[OpenClaw controller agent]
     A -. no route .-> X
     A -. no route .-> I
     classDef blocked fill:#341b20,stroke:#ff5d67,color:#ffabb0
@@ -47,7 +47,7 @@ serves the same frontend build and proxies `/api` requests to FastAPI.
 ## Backend boundaries
 
 - `models.py` owns typed API contracts and enums.
-- `notifier.py` owns the optional server-side OpenClaw HTTP wake hook.
+- `notifier.py` owns the best-effort server-side OpenClaw CLI invocation.
 - `state_machine.py` owns legal command plans and transitional states.
 - `store.py` owns SQLite persistence, seeding, reset, alarms, scenarios,
   telemetry calculation, and audit writes.
@@ -64,12 +64,14 @@ sequenceDiagram
     participant B as Browser
     participant A as FastAPI
     participant D as SQLite
-    participant O as OpenClaw hook (optional)
+    participant O as OpenClaw CLI
     participant C as Controller
 
     B->>A: POST /api/control/requests
     A->>D: Insert PENDING + CREATED audit
-    A-->>O: Wake notification
+    A->>D: COMMIT
+    A-->>O: openclaw agent --agent controller ...
+    A->>D: Audit notification success or failure
     A-->>B: 202 CR-000001 PENDING
     Note over D: Device state is unchanged
     C->>A: POST /api/control/requests/CR-000001/approve
@@ -91,11 +93,14 @@ function is internal to the store and is reached only by the approved-request
 path. The browser polls the persisted request and reports success only after it
 observes `EXECUTED`.
 
-OpenClaw integration is optional and one-way: FastAPI can submit a short wake
-notification using a backend-only bearer token. Hook admission is not treated
-as approval. If the hook is absent or unavailable, the request remains
-`PENDING`; the hook never receives authority to call a physical device or an
-external energy service.
+OpenClaw integration is best-effort and one-way. After committing the request,
+FastAPI runs `openclaw agent` with an argument list, `shell=False`, captured
+output, and a short timeout. It targets the `controller` agent and
+`agent:controller:main` session by default. CLI success and failure are both
+audited. A missing executable, timeout, or nonzero exit leaves the request
+`PENDING`; notification is never treated as approval and never receives
+authority to call a physical device or external energy service. No OpenClaw
+HTTP hook endpoint is used.
 
 ## Frontend boundaries
 

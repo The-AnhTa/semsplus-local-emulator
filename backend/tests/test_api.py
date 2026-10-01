@@ -1,4 +1,10 @@
+import sqlite3
+
+from fastapi.testclient import TestClient
+
+from app.main import create_app
 from app.models import ControlAction
+from app.notifier import NotificationResult
 from app.store import SimulatorStore
 
 
@@ -129,6 +135,61 @@ def test_openclaw_unavailable_leaves_request_pending(unavailable_openclaw_client
     assert response.status_code == 202
     assert response.json()["status"] == "PENDING"
     assert unavailable_openclaw_client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
+    events = unavailable_openclaw_client.get("/api/admin/events").json()
+    notification = next(
+        event for event in events
+        if event["action"] == "CONTROL_REQUEST_NOTIFICATION_FAILED"
+    )
+    assert notification["controlRequestId"] == response.json()["requestId"]
+    assert notification["deviceId"] == "INV-TEST-001"
+    assert notification["controlAction"] == "STOP"
+    assert notification["previousState"] == "RUNNING"
+    assert notification["resultingState"] == "RUNNING"
+    assert notification["result"] == "FAILED"
+    assert notification["errorReason"] == "test OpenClaw CLI unavailable"
+
+
+def test_control_request_is_committed_pending_before_openclaw_cli_runs(tmp_path):
+    database_path = str(tmp_path / "commit-order.db")
+
+    class CommitInspectingNotifier:
+        observed_request = None
+        observed_device_state = None
+
+        def notify_control_request(self, request_id: str, action: str, device_id: str) -> NotificationResult:
+            with sqlite3.connect(database_path) as db:
+                self.observed_request = db.execute(
+                    "SELECT request_id, action, device_id, status FROM control_requests WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+                self.observed_device_state = db.execute(
+                    "SELECT status FROM devices WHERE serial_number=?",
+                    (device_id,),
+                ).fetchone()[0]
+            return NotificationResult(delivered=True)
+
+    notifier = CommitInspectingNotifier()
+    app = create_app(database_path, transition_delay=0, notifier=notifier)
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/api/control/requests",
+            json={"deviceId": "INV-TEST-001", "action": "RESTART"},
+        )
+        events = test_client.get("/api/admin/events").json()
+
+    assert response.status_code == 202
+    assert notifier.observed_request == (
+        "CR-000001", "RESTART", "INV-TEST-001", "PENDING"
+    )
+    assert notifier.observed_device_state == "RUNNING"
+    notification = next(
+        event for event in events
+        if event["action"] == "CONTROL_REQUEST_NOTIFICATION_SUCCEEDED"
+    )
+    assert notification["controlRequestId"] == "CR-000001"
+    assert notification["controlAction"] == "RESTART"
+    assert notification["requestedState"] == "PENDING"
+    assert notification["result"] == "SUCCESS"
 
 
 def test_direct_protected_endpoints_cannot_bypass_approval(client):

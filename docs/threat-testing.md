@@ -58,7 +58,7 @@ boundary.
 - Direct stop, restart, and rapid-shutdown requests return 409 and cannot change
   device state.
 - A protected UI action remains pending until a separate approval is persisted;
-  denial, expiry, and OpenClaw delivery failure leave the device unchanged.
+  denial, expiry, and OpenClaw CLI failure leave the device unchanged.
 - Offline/fault/rapid-shutdown states report zero active power.
 - Grid-overvoltage reports a fault, occurring alarm, zero power, and 262 V.
 - Reset returns the baseline identifiers and removes earlier experiment events.

@@ -88,7 +88,7 @@ database as well.
 - Running, standby, starting, stopping, offline, fault, and rapid-shutdown states
 - Immediate start plus approval-gated stop, restart, and rapid-shutdown controls
 - Persistent control requests with expiry, denial, execution, and failure states
-- Optional server-side OpenClaw wake-hook notifications
+- Best-effort server-side OpenClaw CLI notifications with audited outcomes
 - State-dependent three-phase telemetry and deterministic daily history
 - Synthetic MPPT curve
 - Ten predefined research scenarios
@@ -145,20 +145,27 @@ device. The legacy direct HTTP routes for these three actions return HTTP 409,
 so clients cannot bypass approval gating. Starting an offline synthetic device
 remains an immediate operation.
 
-Set `CONTROL_REQUEST_TTL_SECONDS` to change the approval window. To optionally
-wake an OpenClaw controller, configure these variables only on the backend:
+Set `CONTROL_REQUEST_TTL_SECONDS` to change the approval window. For every new
+request, the backend invokes the OpenClaw CLI after the `PENDING` row is
+committed. These optional overrides configure that backend process:
 
 ```ini
-OPENCLAW_HOOK_URL=http://127.0.0.1:18789/hooks/wake
-OPENCLAW_HOOK_TOKEN=<dedicated-secret>
+OPENCLAW_CLI_PATH=openclaw
 OPENCLAW_CONTROLLER_AGENT=controller
-OPENCLAW_HOOK_TIMEOUT_SECONDS=3
+OPENCLAW_SESSION_KEY=agent:controller:main
+OPENCLAW_CLI_TIMEOUT_SECONDS=30
 ```
 
-The hook token is never included in the React bundle. A failed or unavailable
-hook leaves the request pending and cannot execute an operation. Configure the
-gateway with a dedicated token and agent allowlist as described in the
-[OpenClaw hook documentation](https://docs.openclaw.ai/gateway/config-hooks).
+The command uses an argument list without a shell:
+
+```text
+openclaw agent --agent controller --session-key agent:controller:main \
+  --message "CONTROL_REQUEST request_id=CR-000001 action=STOP device_id=INV-TEST-001 status=PENDING"
+```
+
+A missing CLI, timeout, or nonzero exit is audited as a notification failure.
+It leaves the request pending and can never execute an operation. Notification
+success is also audited. No OpenClaw HTTP hook is used.
 
 ## Local development
 

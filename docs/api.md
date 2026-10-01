@@ -71,9 +71,9 @@ source:
 
 The initial approval window is 120 seconds and is configurable through
 `CONTROL_REQUEST_TTL_SECONDS`. Approving or denying a non-pending request
-returns HTTP 409. Request creation does not alter the device. OpenClaw wake-hook
-delivery is optional and does not affect the HTTP 202 result; failure leaves the
-request pending.
+returns HTTP 409. Request creation does not alter the device. The backend's
+best-effort OpenClaw CLI invocation does not affect the HTTP 202 result; failure
+is audited and leaves the request pending.
 
 ## Alarms
 

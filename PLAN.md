@@ -91,7 +91,7 @@ with generic branding, synthetic data, and no copied proprietary assets.
 - [x] Reject direct protected HTTP operations and keep execution internal.
 - [x] Add configurable expiry with fail-closed approval behavior.
 - [x] Audit created, approved, denied, expired, executed, and failed outcomes.
-- [x] Add optional backend-only OpenClaw wake-hook notification support.
+- [x] Add best-effort backend OpenClaw CLI notifications with audited outcomes.
 - [x] Document configuration, API behavior, and the approval trust boundary.
 - [x] Pass backend, frontend unit/build, and both Playwright verification modes.
 - [ ] Pass Docker Compose build (blocked: no Docker/container runtime installed

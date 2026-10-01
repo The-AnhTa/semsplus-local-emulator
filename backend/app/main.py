@@ -27,7 +27,7 @@ from .models import (
     StatusResponse,
     Telemetry,
 )
-from .notifier import OpenClawNotifier
+from .notifier import OpenClawCliNotifier
 from .state_machine import IllegalTransition
 from .store import ControlRequestConflict, SimulatorStore
 
@@ -39,7 +39,7 @@ def create_app(
     database_path: str | None = None,
     transition_delay: float | None = None,
     control_request_ttl_seconds: int | None = None,
-    notifier: OpenClawNotifier | None = None,
+    notifier: OpenClawCliNotifier | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="CER Test Portal API",
@@ -59,7 +59,7 @@ def create_app(
         control_request_ttl_seconds=control_request_ttl_seconds,
     )
     app.state.store = store
-    app.state.openclaw_notifier = notifier or OpenClawNotifier.from_env()
+    app.state.openclaw_notifier = notifier or OpenClawCliNotifier.from_env()
 
     def actor(value: str | None) -> str:
         return value or "web-user"
@@ -208,9 +208,14 @@ def create_app(
             control_request.action.value,
             control_request.device_id,
         )
+        store.record_control_request_notification(
+            control_request.request_id,
+            notification.delivered,
+            notification.reason,
+        )
         if not notification.delivered and notification.reason:
             logger.warning(
-                "Control request %s remains pending; OpenClaw notification not delivered: %s",
+                "Control request %s remains pending; OpenClaw CLI notification failed: %s",
                 control_request.request_id,
                 notification.reason,
             )

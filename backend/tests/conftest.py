@@ -7,7 +7,7 @@ from app.notifier import NotificationResult
 
 class UnavailableNotifier:
     def notify_control_request(self, request_id: str, action: str, device_id: str) -> NotificationResult:
-        return NotificationResult(delivered=False, reason="test gateway unavailable")
+        return NotificationResult(delivered=False, reason="test OpenClaw CLI unavailable")
 
 
 @pytest.fixture

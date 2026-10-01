@@ -17,5 +17,6 @@ export default defineConfig({
     url: "http://127.0.0.1:8080/api/health",
     timeout: 120_000,
     reuseExistingServer: true,
+    env: { OPENCLAW_CLI_PATH: "__openclaw_cli_unavailable_in_e2e__" },
   },
 });

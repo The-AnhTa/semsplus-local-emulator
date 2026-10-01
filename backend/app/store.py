@@ -545,6 +545,49 @@ class SimulatorStore:
             expired += 1
         return expired
 
+    def record_control_request_notification(
+        self,
+        request_id: str,
+        delivered: bool,
+        failure_reason: str | None = None,
+    ) -> None:
+        with self._lock:
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            request_row = db.execute(
+                "SELECT * FROM control_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if request_row is None:
+                db.rollback()
+                self._close(db)
+                raise KeyError(request_id)
+            device = self._device_row_db(db, request_row["device_id"])
+            current_state = device["status"] if device else request_row["resulting_state"]
+            action = (
+                "CONTROL_REQUEST_NOTIFICATION_SUCCEEDED"
+                if delivered
+                else "CONTROL_REQUEST_NOTIFICATION_FAILED"
+            )
+            self._insert_event(
+                db,
+                "openclaw-cli",
+                action,
+                request_id,
+                "CLI openclaw agent",
+                current_state,
+                ControlRequestStatus.PENDING.value,
+                current_state,
+                "SUCCESS" if delivered else "FAILED",
+                None if delivered else (failure_reason or "OpenClaw CLI notification failed"),
+                control_request_id=request_id,
+                device_id=request_row["device_id"],
+                control_action=request_row["action"],
+                decision_source="openclaw-cli",
+            )
+            db.commit()
+            self._close(db)
+
     def list_control_requests(self, pending_only: bool = False) -> list[ControlRequest]:
         with self._lock:
             db = self._connect()
