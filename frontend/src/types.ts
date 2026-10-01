@@ -1,4 +1,21 @@
 export type DeviceState = "RUNNING" | "STANDBY" | "STOPPING" | "OFFLINE" | "STARTING" | "FAULT" | "RAPID_SHUTDOWN";
+export type ControlAction = "RAPID_SHUTDOWN" | "STOP" | "RESTART";
+export type ControlRequestStatus = "PENDING" | "APPROVED" | "DENIED" | "EXPIRED" | "EXECUTED" | "FAILED";
+
+export interface ControlRequest {
+  requestId: string;
+  deviceId: string;
+  action: ControlAction;
+  status: ControlRequestStatus;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
+  executedAt: string | null;
+  decisionSource: string | null;
+  failureReason: string | null;
+  previousState: DeviceState | null;
+  resultingState: DeviceState | null;
+}
 
 export interface Station {
   id: string;
@@ -69,4 +86,3 @@ export interface Alarm {
   alarmTime: string;
   recoveredTime: string | null;
 }
-

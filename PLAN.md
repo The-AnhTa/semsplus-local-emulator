@@ -33,7 +33,8 @@ Acceptance: frontend builds and component tests pass.
 - [x] Surface transitional states and explicit API errors in the UI.
 - [x] Keep telemetry, lists, and details consistent with simulator state.
 
-Acceptance: browser workflow can stop an online device and start it again.
+Acceptance: browser workflow can request and approve a stop, then start the
+offline synthetic device again.
 
 ## Phase 4 — Alarms, scenarios, and audit logs
 
@@ -81,3 +82,21 @@ with generic branding, synthetic data, and no copied proprietary assets.
 - [x] Add minimal Python runtime requirements and native Linux/Windows launchers.
 - [x] Keep compiled frontend assets available in a fresh clone.
 - [x] Pass backend, frontend, and single-process Playwright verification.
+
+## Milestone 8 — Human-in-the-loop control gating
+
+- [x] Persist deterministic control requests and lifecycle state in SQLite.
+- [x] Route stop, restart, and rapid shutdown UI actions through requests.
+- [x] Add create/list/pending/get/approve/deny REST endpoints.
+- [x] Reject direct protected HTTP operations and keep execution internal.
+- [x] Add configurable expiry with fail-closed approval behavior.
+- [x] Audit created, approved, denied, expired, executed, and failed outcomes.
+- [x] Add optional backend-only OpenClaw wake-hook notification support.
+- [x] Document configuration, API behavior, and the approval trust boundary.
+- [x] Pass backend, frontend unit/build, and both Playwright verification modes.
+- [ ] Pass Docker Compose build (blocked: no Docker/container runtime installed
+      on the current machine).
+
+Acceptance: every protected UI action remains unchanged while pending and can
+execute only through a persisted, unexpired approval. Denial, expiry, hook
+failure, and direct endpoint access cannot alter the simulated inverter.

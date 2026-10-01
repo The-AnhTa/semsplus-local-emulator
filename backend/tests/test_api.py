@@ -1,3 +1,7 @@
+from app.models import ControlAction
+from app.store import SimulatorStore
+
+
 def test_login_is_local_and_deterministic(client):
     bad = client.post("/api/auth/login", json={"email": "wrong", "password": "wrong"})
     assert bad.status_code == 401
@@ -15,9 +19,33 @@ def test_device_transition_and_state_dependent_telemetry(client):
     assert running["status"] == "RUNNING"
     assert running["activePowerKw"] > 0
 
-    stopped = client.post("/api/devices/device-test-001/stop")
+    requested = client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "STOP"},
+    )
+    assert requested.status_code == 202
+    assert requested.json()["status"] == "PENDING"
+    assert requested.json()["requestId"] == "CR-000001"
+    assert client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
+
+    stopped = client.post(
+        f"/api/control/requests/{requested.json()['requestId']}/approve",
+        json={"decisionSource": "test-controller"},
+    )
     assert stopped.status_code == 200
-    assert stopped.json()["status"] == "OFFLINE"
+    assert stopped.json()["status"] == "EXECUTED"
+    assert client.get("/api/devices/device-test-001").json()["status"] == "OFFLINE"
+    events = client.get("/api/admin/events").json()
+    approved = next(event for event in events if event["action"] == "CONTROL_REQUEST_APPROVED")
+    executed = next(event for event in events if event["action"] == "CONTROL_REQUEST_EXECUTED")
+    for event in (approved, executed):
+        assert event["timestamp"]
+        assert event["controlRequestId"] == requested.json()["requestId"]
+        assert event["deviceId"] == "INV-TEST-001"
+        assert event["controlAction"] == "STOP"
+        assert event["decisionSource"] == "test-controller"
+        assert event["previousState"] == "RUNNING"
+    assert executed["resultingState"] == "OFFLINE"
     telemetry = client.get("/api/devices/device-test-001/telemetry").json()
     assert telemetry["activePowerKw"] == 0
     assert telemetry["phaseACurrent"] == 0
@@ -38,15 +66,137 @@ def test_illegal_transition_is_explicit_and_audited(client):
 
 
 def test_restart_and_rapid_shutdown(client):
-    restarted = client.post("/api/devices/device-test-001/restart")
+    restart_request = client.post(
+        "/api/control/requests",
+        json={"deviceId": "device-test-001", "action": "RESTART"},
+    ).json()
+    restarted = client.post(f"/api/control/requests/{restart_request['requestId']}/approve")
     assert restarted.status_code == 200
-    assert restarted.json()["status"] == "RUNNING"
+    assert restarted.json()["status"] == "EXECUTED"
+    assert client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
 
-    shutdown = client.post("/api/devices/device-test-001/rapid-shutdown")
+    shutdown_request = client.post(
+        "/api/control/requests",
+        json={"deviceId": "device-test-001", "action": "RAPID_SHUTDOWN"},
+    ).json()
+    shutdown = client.post(f"/api/control/requests/{shutdown_request['requestId']}/approve")
     assert shutdown.status_code == 200
-    assert shutdown.json()["status"] == "RAPID_SHUTDOWN"
-    assert shutdown.json()["rapidShutdown"] is True
+    assert shutdown.json()["status"] == "EXECUTED"
+    device = client.get("/api/devices/device-test-001").json()
+    assert device["status"] == "RAPID_SHUTDOWN"
+    assert device["rapidShutdown"] is True
     assert client.get("/api/devices/device-test-001/telemetry").json()["activePowerKw"] == 0
+
+
+def test_denied_control_request_does_not_change_device(client):
+    request = client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "STOP"},
+    ).json()
+    denied = client.post(
+        f"/api/control/requests/{request['requestId']}/deny",
+        json={"decisionSource": "human-reviewer"},
+    )
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "DENIED"
+    assert denied.json()["decisionSource"] == "human-reviewer"
+    assert client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
+
+
+def test_expired_control_request_cannot_execute(expired_client):
+    request = expired_client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "STOP"},
+    ).json()
+    approval = expired_client.post(f"/api/control/requests/{request['requestId']}/approve")
+    assert approval.status_code == 409
+    assert "expired" in approval.json()["detail"]
+    stored = expired_client.get(f"/api/control/requests/{request['requestId']}").json()
+    assert stored["status"] == "EXPIRED"
+    assert expired_client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
+    events = expired_client.get("/api/admin/events").json()
+    expired = next(event for event in events if event["action"] == "CONTROL_REQUEST_EXPIRED")
+    assert expired["controlRequestId"] == request["requestId"]
+    assert expired["resultingState"] == "RUNNING"
+    assert expired["decisionSource"] == "system-expiry"
+
+
+def test_openclaw_unavailable_leaves_request_pending(unavailable_openclaw_client):
+    response = unavailable_openclaw_client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "STOP"},
+    )
+    assert response.status_code == 202
+    assert response.json()["status"] == "PENDING"
+    assert unavailable_openclaw_client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
+
+
+def test_direct_protected_endpoints_cannot_bypass_approval(client):
+    for endpoint in ("stop", "restart", "rapid-shutdown"):
+        response = client.post(f"/api/devices/device-test-001/{endpoint}")
+        assert response.status_code == 409
+        assert "Approval required" in response.json()["detail"]
+        assert client.get("/api/devices/device-test-001").json()["status"] == "RUNNING"
+
+
+def test_execution_failure_is_persisted_and_audited(client):
+    stop_request = client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "STOP"},
+    ).json()
+    restart_request = client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "RESTART"},
+    ).json()
+    assert client.post(f"/api/control/requests/{stop_request['requestId']}/approve").json()["status"] == "EXECUTED"
+    failed = client.post(f"/api/control/requests/{restart_request['requestId']}/approve").json()
+    assert failed["status"] == "FAILED"
+    assert failed["failureReason"]
+    assert client.get("/api/devices/device-test-001").json()["status"] == "OFFLINE"
+    events = client.get("/api/admin/events").json()
+    assert any(event["action"] == "CONTROL_REQUEST_FAILED" for event in events)
+
+
+def test_control_request_lists_and_audit_lifecycle(client):
+    first = client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "STOP"},
+    ).json()
+    second = client.post(
+        "/api/control/requests",
+        json={"deviceId": "INV-TEST-001", "action": "RESTART"},
+    ).json()
+    assert first["requestId"] == "CR-000001"
+    assert second["requestId"] == "CR-000002"
+    assert len(client.get("/api/control/requests/pending").json()) == 2
+    client.post(
+        f"/api/control/requests/{first['requestId']}/deny",
+        json={"decisionSource": "controller-agent"},
+    )
+    assert len(client.get("/api/control/requests/pending").json()) == 1
+    assert len(client.get("/api/control/requests").json()) == 2
+    events = client.get("/api/admin/events").json()
+    actions = {event["action"] for event in events}
+    assert {"CONTROL_REQUEST_CREATED", "CONTROL_REQUEST_DENIED"}.issubset(actions)
+    denied_event = next(event for event in events if event["action"] == "CONTROL_REQUEST_DENIED")
+    assert denied_event["controlRequestId"] == first["requestId"]
+    assert denied_event["deviceId"] == "INV-TEST-001"
+    assert denied_event["controlAction"] == "STOP"
+    assert denied_event["decisionSource"] == "controller-agent"
+
+
+def test_control_request_persists_across_store_recreation(tmp_path):
+    database = str(tmp_path / "persistent.db")
+    first_store = SimulatorStore(database, transition_delay=0)
+    created = first_store.create_control_request("INV-TEST-001", ControlAction.STOP)
+
+    reopened_store = SimulatorStore(database, transition_delay=0)
+    persisted = reopened_store.get_control_request(created.request_id)
+
+    assert persisted.request_id == "CR-000001"
+    assert persisted.status == "PENDING"
+    assert persisted.device_id == "INV-TEST-001"
+    assert reopened_store.get_device("INV-TEST-001").status == "RUNNING"
 
 
 def test_scenario_creates_and_recovers_alarm(client):

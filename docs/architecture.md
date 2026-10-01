@@ -26,6 +26,7 @@ flowchart TB
     A --> T
     M --> D
     T --> D
+    A -. optional wake notification .-> O[OpenClaw Gateway]
     A -. no route .-> X
     A -. no route .-> I
     classDef blocked fill:#341b20,stroke:#ff5d67,color:#ffabb0
@@ -46,6 +47,7 @@ serves the same frontend build and proxies `/api` requests to FastAPI.
 ## Backend boundaries
 
 - `models.py` owns typed API contracts and enums.
+- `notifier.py` owns the optional server-side OpenClaw HTTP wake hook.
 - `state_machine.py` owns legal command plans and transitional states.
 - `store.py` owns SQLite persistence, seeding, reset, alarms, scenarios,
   telemetry calculation, and audit writes.
@@ -54,6 +56,46 @@ serves the same frontend build and proxies `/api` requests to FastAPI.
 SQLite access is serialized for state-changing operations. Transitions are
 validated on the server and return HTTP 409 when illegal. A rejected operation
 is audited before the error is returned.
+
+## Human-in-the-loop control boundary
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as FastAPI
+    participant D as SQLite
+    participant O as OpenClaw hook (optional)
+    participant C as Controller
+
+    B->>A: POST /api/control/requests
+    A->>D: Insert PENDING + CREATED audit
+    A-->>O: Wake notification
+    A-->>B: 202 CR-000001 PENDING
+    Note over D: Device state is unchanged
+    C->>A: POST /api/control/requests/CR-000001/approve
+    A->>D: BEGIN IMMEDIATE; verify PENDING and unexpired
+    A->>D: APPROVED audit; execute internal transition
+    A->>D: Store EXECUTED (or FAILED) + audit; COMMIT
+    A-->>C: Final persisted request
+```
+
+`control_requests` and their lifecycle audits are durable SQLite records.
+Approval, execution, and final status are written in a single transaction. A
+savepoint restores the device state if execution fails. Denial and expiry only
+update the request and audit log. Expiration is evaluated whenever requests are
+listed, fetched, approved, or denied.
+
+Only `start` has a directly executable HTTP route. The stop, restart, and rapid
+shutdown routes explicitly reject with HTTP 409. Their actual transition
+function is internal to the store and is reached only by the approved-request
+path. The browser polls the persisted request and reports success only after it
+observes `EXECUTED`.
+
+OpenClaw integration is optional and one-way: FastAPI can submit a short wake
+notification using a backend-only bearer token. Hook admission is not treated
+as approval. If the hook is absent or unavailable, the request remains
+`PENDING`; the hook never receives authority to call a physical device or an
+external energy service.
 
 ## Frontend boundaries
 
@@ -67,4 +109,4 @@ vendor integration code.
 The initial data set is one station and one device. Native launchers store the
 database in `data/cer-emulator.db`; Docker uses the `cer-data` named volume.
 `POST /api/admin/reset` clears mutable records and reseeds the same identifiers
-and baseline values.
+and baseline values, including resetting the readable control-request sequence.

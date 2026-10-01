@@ -45,6 +45,21 @@ class AlarmType(StrEnum):
     DEVICE_FAULT = "DEVICE_FAULT"
 
 
+class ControlAction(StrEnum):
+    RAPID_SHUTDOWN = "RAPID_SHUTDOWN"
+    STOP = "STOP"
+    RESTART = "RESTART"
+
+
+class ControlRequestStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    EXPIRED = "EXPIRED"
+    EXECUTED = "EXECUTED"
+    FAILED = "FAILED"
+
+
 class LoginRequest(ApiModel):
     email: str
     password: str
@@ -62,6 +77,30 @@ class ScenarioRequest(ApiModel):
 
 class AlarmRequest(ApiModel):
     alarm_type: AlarmType
+
+
+class ControlRequestCreate(ApiModel):
+    device_id: str = Field(min_length=1)
+    action: ControlAction
+
+
+class ControlDecisionRequest(ApiModel):
+    decision_source: str = Field(default="controller", min_length=1, max_length=100)
+
+
+class ControlRequest(ApiModel):
+    request_id: str
+    device_id: str
+    action: ControlAction
+    status: ControlRequestStatus
+    created_at: str
+    expires_at: str
+    decided_at: str | None = None
+    executed_at: str | None = None
+    decision_source: str | None = None
+    failure_reason: str | None = None
+    previous_state: DeviceState | None = None
+    resulting_state: DeviceState | None = None
 
 
 class Station(ApiModel):
@@ -146,6 +185,10 @@ class AuditEvent(ApiModel):
     resulting_state: str | None = None
     result: str
     error_reason: str | None = None
+    control_request_id: str | None = None
+    device_id: str | None = None
+    control_action: str | None = None
+    decision_source: str | None = None
 
 
 class StatusResponse(ApiModel):

@@ -1,4 +1,5 @@
 import os
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -11,6 +12,10 @@ from .models import (
     Alarm,
     AlarmRequest,
     AuditEvent,
+    ControlAction,
+    ControlDecisionRequest,
+    ControlRequest,
+    ControlRequestCreate,
     Device,
     DeviceState,
     HistoryPoint,
@@ -22,11 +27,20 @@ from .models import (
     StatusResponse,
     Telemetry,
 )
+from .notifier import OpenClawNotifier
 from .state_machine import IllegalTransition
-from .store import SimulatorStore
+from .store import ControlRequestConflict, SimulatorStore
 
 
-def create_app(database_path: str | None = None, transition_delay: float | None = None) -> FastAPI:
+logger = logging.getLogger(__name__)
+
+
+def create_app(
+    database_path: str | None = None,
+    transition_delay: float | None = None,
+    control_request_ttl_seconds: int | None = None,
+    notifier: OpenClawNotifier | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="CER Test Portal API",
         description="Offline-only synthetic CER/inverter simulator for security research.",
@@ -39,8 +53,13 @@ def create_app(database_path: str | None = None, transition_delay: float | None 
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    store = SimulatorStore(database_path=database_path, transition_delay=transition_delay)
+    store = SimulatorStore(
+        database_path=database_path,
+        transition_delay=transition_delay,
+        control_request_ttl_seconds=control_request_ttl_seconds,
+    )
     app.state.store = store
+    app.state.openclaw_notifier = notifier or OpenClawNotifier.from_env()
 
     def actor(value: str | None) -> str:
         return value or "web-user"
@@ -134,9 +153,9 @@ def create_app(database_path: str | None = None, transition_delay: float | None 
         except KeyError:
             raise not_found("Device", device_id)
 
-    def run_command(device_id: str, command: str, x_actor: str | None) -> Device:
+    def run_start(device_id: str, x_actor: str | None) -> Device:
         try:
-            return store.command(device_id, command, actor(x_actor))
+            return store.start_device(device_id, actor(x_actor))
         except KeyError:
             raise not_found("Device", device_id)
         except IllegalTransition as exc:
@@ -144,19 +163,101 @@ def create_app(database_path: str | None = None, transition_delay: float | None 
 
     @app.post("/api/devices/{device_id}/start", response_model=Device)
     def start_device(device_id: str, x_actor: str | None = Header(default=None)) -> Device:
-        return run_command(device_id, "start", x_actor)
+        return run_start(device_id, x_actor)
+
+    def reject_protected(device_id: str, action: ControlAction, x_actor: str | None) -> None:
+        try:
+            store.reject_direct_protected_command(device_id, action, actor(x_actor))
+        except KeyError:
+            raise not_found("Device", device_id)
+        raise HTTPException(
+            status_code=409,
+            detail="Approval required: create a request with POST /api/control/requests",
+        )
 
     @app.post("/api/devices/{device_id}/stop", response_model=Device)
     def stop_device(device_id: str, x_actor: str | None = Header(default=None)) -> Device:
-        return run_command(device_id, "stop", x_actor)
+        reject_protected(device_id, ControlAction.STOP, x_actor)
 
     @app.post("/api/devices/{device_id}/restart", response_model=Device)
     def restart_device(device_id: str, x_actor: str | None = Header(default=None)) -> Device:
-        return run_command(device_id, "restart", x_actor)
+        reject_protected(device_id, ControlAction.RESTART, x_actor)
 
     @app.post("/api/devices/{device_id}/rapid-shutdown", response_model=Device)
     def rapid_shutdown(device_id: str, x_actor: str | None = Header(default=None)) -> Device:
-        return run_command(device_id, "rapid-shutdown", x_actor)
+        reject_protected(device_id, ControlAction.RAPID_SHUTDOWN, x_actor)
+
+    @app.post("/api/control/requests", response_model=ControlRequest, status_code=202)
+    def create_control_request(
+        request: ControlRequestCreate,
+        x_actor: str | None = Header(default=None),
+    ) -> ControlRequest:
+        try:
+            control_request = store.create_control_request(
+                request.device_id,
+                request.action,
+                actor(x_actor),
+            )
+        except KeyError:
+            raise not_found("Device", request.device_id)
+        except IllegalTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+        notification = app.state.openclaw_notifier.notify_control_request(
+            control_request.request_id,
+            control_request.action.value,
+            control_request.device_id,
+        )
+        if not notification.delivered and notification.reason:
+            logger.warning(
+                "Control request %s remains pending; OpenClaw notification not delivered: %s",
+                control_request.request_id,
+                notification.reason,
+            )
+        return control_request
+
+    @app.get("/api/control/requests", response_model=list[ControlRequest])
+    def control_requests() -> list[ControlRequest]:
+        return store.list_control_requests()
+
+    @app.get("/api/control/requests/pending", response_model=list[ControlRequest])
+    def pending_control_requests() -> list[ControlRequest]:
+        return store.list_control_requests(pending_only=True)
+
+    @app.get("/api/control/requests/{request_id}", response_model=ControlRequest)
+    def control_request(request_id: str) -> ControlRequest:
+        try:
+            return store.get_control_request(request_id)
+        except KeyError:
+            raise not_found("Control request", request_id)
+
+    @app.post("/api/control/requests/{request_id}/approve", response_model=ControlRequest)
+    def approve_control_request(
+        request_id: str,
+        decision: ControlDecisionRequest | None = None,
+        x_actor: str | None = Header(default=None),
+    ) -> ControlRequest:
+        source = decision.decision_source if decision else (x_actor or "controller")
+        try:
+            return store.approve_control_request(request_id, source)
+        except KeyError:
+            raise not_found("Control request", request_id)
+        except ControlRequestConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/api/control/requests/{request_id}/deny", response_model=ControlRequest)
+    def deny_control_request(
+        request_id: str,
+        decision: ControlDecisionRequest | None = None,
+        x_actor: str | None = Header(default=None),
+    ) -> ControlRequest:
+        source = decision.decision_source if decision else (x_actor or "controller")
+        try:
+            return store.deny_control_request(request_id, source)
+        except KeyError:
+            raise not_found("Control request", request_id)
+        except ControlRequestConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @app.get("/api/alarms", response_model=list[Alarm])
     def alarms(

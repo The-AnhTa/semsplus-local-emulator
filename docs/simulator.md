@@ -35,6 +35,14 @@ Commands outside the defined edges fail with HTTP 409. Transitional states are
 written explicitly; a configurable short delay separates steps. Set
 `CER_TRANSITION_DELAY_SECONDS=0` for fast deterministic unit tests.
 
+The diagram describes simulator transitions, not direct browser authority.
+`stop`, `restart`, and `rapid shutdown` execute only after an unexpired
+`control_requests` record is approved. A newly created or denied request never
+changes the state. Their legacy direct device endpoints return HTTP 409 while
+approval gating is enabled. `start` remains directly available so an approved
+stop can be followed by the existing startup workflow. Pending requests expire
+after `CONTROL_REQUEST_TTL_SECONDS` (120 by default).
+
 ## Telemetry
 
 The simulator models active/reactive power, power factor, AC frequency, daily
@@ -71,6 +79,7 @@ the device state.
 
 ## Audit semantics
 
-Every command, scenario load, alarm recovery, and reset is logged. A reset
-clears the old experiment log, reseeds state, then records itself as the first
-event. Illegal device commands are retained with `result=REJECTED` and a reason.
+Every command, control-request lifecycle change, scenario load, alarm recovery,
+and reset is logged. A reset clears the old experiment log and control requests,
+reseeds state and the request sequence, then records itself as the first event.
+Illegal device commands are retained with `result=REJECTED` and a reason.

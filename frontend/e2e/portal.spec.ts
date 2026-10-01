@@ -14,7 +14,7 @@ async function login(page: import("@playwright/test").Page) {
 
 test.beforeEach(async ({ request }) => { await reset(request); });
 
-test("login, navigate, stop and start device, then open Alarm Center", async ({ page }) => {
+test("login, request and approve a stop, start device, then open Alarm Center", async ({ page, request }) => {
   await login(page);
   if (process.env.CAPTURE_UI) await page.screenshot({ path: "test-results/station-list.png", fullPage: true });
   await page.getByTestId("station-link").click();
@@ -27,6 +27,23 @@ test("login, navigate, stop and start device, then open Alarm Center", async ({ 
   await page.getByTestId("open-controls").click();
   if (process.env.CAPTURE_UI) await page.screenshot({ path: "test-results/control-drawer.png", fullPage: true });
   await page.getByTestId("stop-device-button").click();
+  await expect(page.getByTestId("approval-message")).toContainText("Approval request CR-000001 created.");
+  await expect(page.getByTestId("approval-message")).toContainText("Awaiting controller confirmation.");
+  await expect(page.getByTestId("pending-control-request")).toContainText("CR-000001");
+  await expect(page.getByTestId("device-status")).toContainText("Running");
+
+  const pendingResponse = await request.get("/api/control/requests/pending");
+  expect(pendingResponse.ok()).toBeTruthy();
+  const pending = await pendingResponse.json();
+  expect(pending).toHaveLength(1);
+  expect(pending[0]).toMatchObject({ requestId: "CR-000001", action: "STOP", status: "PENDING" });
+
+  const approval = await request.post(`/api/control/requests/${pending[0].requestId}/approve`, {
+    data: { decisionSource: "e2e-controller" },
+  });
+  expect(approval.ok()).toBeTruthy();
+  expect((await approval.json()).status).toBe("EXECUTED");
+  await expect(page.getByTestId("approval-message")).toContainText("Approval request CR-000001 executed.");
   await expect(page.getByTestId("device-status")).toContainText("Offline");
 
   await page.getByTestId("start-device-button").click();

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { ErrorBanner, Icon, LoadingState, StatusPill } from "../components";
-import type { Device, HistoryPoint, MpptPoint, Telemetry } from "../types";
+import type { ControlAction, ControlRequest, Device, HistoryPoint, MpptPoint, Telemetry } from "../types";
 import { formatNumber } from "../utils";
 
 function today(): string { return new Date().toISOString().slice(0, 10); }
@@ -45,6 +45,7 @@ export function DeviceDetailPage() {
   const [drawer, setDrawer] = useState(false);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState("");
+  const [controlRequest, setControlRequest] = useState<ControlRequest | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
@@ -69,6 +70,47 @@ export function DeviceDetailPage() {
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Control request failed"); }
     finally { setActing(""); }
   };
+
+  const requestProtectedAction = async (action: ControlAction) => {
+    setActing(action); setError(""); setMessage("");
+    try {
+      const created = await api.createControlRequest(deviceId, action);
+      setControlRequest(created);
+      setMessage(`Approval request ${created.requestId} created.\nAwaiting controller confirmation.`);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Approval request failed"); }
+    finally { setActing(""); }
+  };
+
+  useEffect(() => {
+    if (!controlRequest || !["PENDING", "APPROVED"].includes(controlRequest.status)) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const updated = await api.controlRequest(controlRequest.requestId);
+        if (!active) return;
+        if (updated.status === "EXECUTED") {
+          setMessage(`Approval request ${updated.requestId} executed.\nDevice state: ${updated.resultingState?.toLowerCase().replace("_", " ")}.`);
+          setControlRequest(updated);
+          await load();
+        } else if (updated.status === "DENIED") {
+          setControlRequest(updated);
+          setMessage(`Approval request ${updated.requestId} was denied.\nThe device was not changed.`);
+        } else if (updated.status === "EXPIRED") {
+          setControlRequest(updated);
+          setMessage(`Approval request ${updated.requestId} expired.\nThe device was not changed.`);
+        } else if (updated.status === "FAILED") {
+          setControlRequest(updated);
+          setError(`Approval request ${updated.requestId} failed: ${updated.failureReason ?? "operation was not executed"}`);
+        } else {
+          setControlRequest(updated);
+        }
+      } catch (caught) {
+        if (active) setError(caught instanceof Error ? caught.message : "Unable to check approval request");
+      }
+    };
+    const interval = window.setInterval(() => { void poll(); }, 1000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [controlRequest?.requestId, controlRequest?.status, load]);
   const phases = useMemo(() => telemetry ? [
     ["Phase A", telemetry.phaseAVoltage, telemetry.phaseACurrent],
     ["Phase B", telemetry.phaseBVoltage, telemetry.phaseBCurrent],
@@ -80,7 +122,7 @@ export function DeviceDetailPage() {
   return (
     <div className="device-detail" data-testid="device-detail-page">
       <div className="detail-heading"><div><div className="breadcrumbs"><Link to="/devices">Device List</Link><span>/</span>Device basic information</div><h1>{device.name}</h1><StatusPill status={device.status} testId="device-status"/></div><div className="device-meta"><span>Station <strong>{device.stationName}</strong></span><span>SN <strong>{device.serialNumber}</strong></span></div></div>
-      {error && <ErrorBanner message={error}/>} {message && <div className="success-banner" role="status">{message}</div>}
+      {error && <ErrorBanner message={error}/>} {message && <div className="success-banner" role="status" data-testid="approval-message">{message}</div>}
       <div className="detail-grid">
         <section className="device-hero"><div className="simulation-label"><i/> LOCAL SIMULATION</div><InverterIllustration active={device.status === "RUNNING"}/><div className="common-controls"><div className="section-title"><span>Common controls</span><small>All actions affect synthetic state only</small></div><div className="control-cards"><button onClick={() => setDrawer(true)} data-testid="open-controls"><span><Icon name="controls" size={30}/></span><strong>Device Start / Stop</strong><small>Start, stop, restart or isolate</small></button><button onClick={() => setMessage("General settings are read-only in this research build.")}><span>⚙</span><strong>General Settings</strong><small>View simulator configuration</small></button></div><button className="more-control" onClick={() => setDrawer(true)}>More control <Icon name="arrow" size={15}/></button></div></section>
         <section className="detail-data">
@@ -88,8 +130,7 @@ export function DeviceDetailPage() {
           <div className="monitoring panel-inner"><div className="monitor-toolbar"><div className="segmented"><button className={tab === "monitoring" ? "active" : ""} onClick={() => setTab("monitoring")}>Operation Monitoring</button><button className={tab === "mppt" ? "active" : ""} onClick={() => setTab("mppt")}>MPPT Curve</button></div>{tab === "monitoring" && <input aria-label="Monitoring date" type="date" value={date} onChange={(event) => setDate(event.target.value)} data-testid="history-date"/>}</div><div className="chart-wrap"><LineChart points={tab === "monitoring" ? history : mppt} keyName={tab === "monitoring" ? "activePowerKw" : "powerKw"} color={tab === "monitoring" ? "#f2b84b" : "#5ad5b2"}/><div className="chart-legend"><i style={{background: tab === "monitoring" ? "#f2b84b" : "#5ad5b2"}}/>{tab === "monitoring" ? "Active power (kW)" : "MPPT power (kW)"}</div></div></div>
         </section>
       </div>
-      {drawer && <div className="drawer-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) setDrawer(false); }}><aside className="control-drawer" role="dialog" aria-modal="true" aria-labelledby="control-title" data-testid="control-drawer"><header><div><span className="kicker">SYNTHETIC DEVICE CONTROL</span><h2 id="control-title">Device Start / Stop</h2></div><button onClick={() => setDrawer(false)} aria-label="Close controls"><Icon name="close"/></button></header><div className="drawer-device"><InverterIllustration active={device.status === "RUNNING"}/><div><strong>{device.name}</strong><code>{device.serialNumber}</code><StatusPill status={device.status}/></div></div><div className="control-list"><button onClick={() => command("rapid-shutdown")} disabled={!!acting || !["RUNNING", "STANDBY"].includes(device.status)} data-testid="rapid-shutdown-button"><span className="control-symbol danger">!</span><span><strong>Rapid Shutdown</strong><small>Immediately isolate this simulated inverter</small></span><em>{acting === "rapid-shutdown" ? "Working…" : "Isolate"}</em></button><button onClick={() => command("start")} disabled={!!acting || !["OFFLINE", "STANDBY", "RAPID_SHUTDOWN"].includes(device.status)} data-testid="start-device-button"><span className="control-symbol success">▶</span><span><strong>Start up</strong><small>Transition through Starting to Running</small></span><em>{acting === "start" ? "Working…" : "Start"}</em></button><button onClick={() => command("stop")} disabled={!!acting || !["RUNNING", "STANDBY", "FAULT"].includes(device.status)} data-testid="stop-device-button"><span className="control-symbol warning">■</span><span><strong>Stop</strong><small>Transition through Stopping to Offline</small></span><em>{acting === "stop" ? "Working…" : "Stop"}</em></button><button onClick={() => command("restart")} disabled={!!acting || !["RUNNING", "STANDBY"].includes(device.status)} data-testid="restart-device-button"><span className="control-symbol">↻</span><span><strong>Restart</strong><small>Perform a complete synthetic stop/start cycle</small></span><em>{acting === "restart" ? "Working…" : "Restart"}</em></button></div><footer><Icon name="bolt"/><p>These controls write only to the local SQLite simulator. They cannot discover or operate physical hardware.</p></footer></aside></div>}
+      {drawer && <div className="drawer-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) setDrawer(false); }}><aside className="control-drawer" role="dialog" aria-modal="true" aria-labelledby="control-title" data-testid="control-drawer"><header><div><span className="kicker">SYNTHETIC DEVICE CONTROL</span><h2 id="control-title">Device Start / Stop</h2></div><button onClick={() => setDrawer(false)} aria-label="Close controls"><Icon name="close"/></button></header><div className="drawer-device"><InverterIllustration active={device.status === "RUNNING"}/><div><strong>{device.name}</strong><code>{device.serialNumber}</code><StatusPill status={device.status}/></div></div>{controlRequest && ["PENDING", "APPROVED"].includes(controlRequest.status) && <div className="approval-pending" data-testid="pending-control-request"><strong>{controlRequest.requestId} · {controlRequest.action.replace("_", " ")}</strong><span>Awaiting controller confirmation</span></div>}<div className="control-list"><button onClick={() => requestProtectedAction("RAPID_SHUTDOWN")} disabled={!!acting || !!(controlRequest && ["PENDING", "APPROVED"].includes(controlRequest.status)) || !["RUNNING", "STANDBY"].includes(device.status)} data-testid="rapid-shutdown-button"><span className="control-symbol danger">!</span><span><strong>Rapid Shutdown</strong><small>Requires controller approval before isolation</small></span><em>{acting === "RAPID_SHUTDOWN" ? "Requesting…" : "Request"}</em></button><button onClick={() => command("start")} disabled={!!acting || !["OFFLINE", "STANDBY", "RAPID_SHUTDOWN"].includes(device.status)} data-testid="start-device-button"><span className="control-symbol success">▶</span><span><strong>Start up</strong><small>Transition through Starting to Running</small></span><em>{acting === "start" ? "Working…" : "Start"}</em></button><button onClick={() => requestProtectedAction("STOP")} disabled={!!acting || !!(controlRequest && ["PENDING", "APPROVED"].includes(controlRequest.status)) || !["RUNNING", "STANDBY", "FAULT"].includes(device.status)} data-testid="stop-device-button"><span className="control-symbol warning">■</span><span><strong>Stop</strong><small>Requires controller approval before stopping</small></span><em>{acting === "STOP" ? "Requesting…" : "Request"}</em></button><button onClick={() => requestProtectedAction("RESTART")} disabled={!!acting || !!(controlRequest && ["PENDING", "APPROVED"].includes(controlRequest.status)) || !["RUNNING", "STANDBY"].includes(device.status)} data-testid="restart-device-button"><span className="control-symbol">↻</span><span><strong>Restart</strong><small>Requires controller approval before restart</small></span><em>{acting === "RESTART" ? "Requesting…" : "Request"}</em></button></div><footer><Icon name="bolt"/><p>Stop, restart, and rapid shutdown require persisted controller approval. These controls affect only the local SQLite simulator.</p></footer></aside></div>}
     </div>
   );
 }
-

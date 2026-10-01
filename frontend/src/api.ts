@@ -1,4 +1,4 @@
-import type { Alarm, Device, HistoryPoint, MpptPoint, Station, Telemetry } from "./types";
+import type { Alarm, ControlAction, ControlRequest, Device, HistoryPoint, MpptPoint, Station, Telemetry } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
@@ -26,7 +26,11 @@ export const api = {
   history: (id: string, day: string) => request<HistoryPoint[]>(`/devices/${id}/history?day=${day}`),
   mppt: (id: string) => request<MpptPoint[]>(`/devices/${id}/mppt`),
   command: (id: string, command: string) => request<Device>(`/devices/${id}/${command}`, { method: "POST" }),
+  createControlRequest: (id: string, action: ControlAction) => request<ControlRequest>("/control/requests", {
+    method: "POST",
+    body: JSON.stringify({ deviceId: id, action }),
+  }),
+  controlRequest: (id: string) => request<ControlRequest>(`/control/requests/${id}`),
   alarms: () => request<Alarm[]>("/alarms"),
   recoverAlarm: (id: number) => request<Alarm>(`/alarms/${id}/recover`, { method: "POST" }),
 };
-

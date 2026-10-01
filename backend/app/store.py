@@ -3,13 +3,16 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import (
     Alarm,
     AlarmType,
     AuditEvent,
+    ControlAction,
+    ControlRequest,
+    ControlRequestStatus,
     Device,
     DeviceState,
     HistoryPoint,
@@ -35,16 +38,44 @@ ALARM_CATALOG: dict[AlarmType, tuple[str, str]] = {
     AlarmType.DEVICE_FAULT: ("Device fault", "CRITICAL"),
 }
 
+CONTROL_ACTION_COMMANDS: dict[ControlAction, str] = {
+    ControlAction.RAPID_SHUTDOWN: "rapid-shutdown",
+    ControlAction.STOP: "stop",
+    ControlAction.RESTART: "restart",
+}
+
+
+class ControlRequestConflict(ValueError):
+    pass
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def utc_datetime() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_utc(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
 class SimulatorStore:
-    def __init__(self, database_path: str | None = None, transition_delay: float | None = None):
+    def __init__(
+        self,
+        database_path: str | None = None,
+        transition_delay: float | None = None,
+        control_request_ttl_seconds: int | None = None,
+    ):
         self.database_path = database_path or os.getenv("CER_DATABASE_PATH", "./cer-emulator.db")
         self.transition_delay = transition_delay if transition_delay is not None else float(
             os.getenv("CER_TRANSITION_DELAY_SECONDS", "0.15")
+        )
+        self.control_request_ttl_seconds = (
+            control_request_ttl_seconds
+            if control_request_ttl_seconds is not None
+            else int(os.getenv("CONTROL_REQUEST_TTL_SECONDS", "120"))
         )
         self._lock = threading.RLock()
         if self.database_path != ":memory:":
@@ -91,7 +122,23 @@ class SimulatorStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
                     actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
                     http_request TEXT NOT NULL, previous_state TEXT, requested_state TEXT,
-                    resulting_state TEXT, result TEXT NOT NULL, error_reason TEXT
+                    resulting_state TEXT, result TEXT NOT NULL, error_reason TEXT,
+                    control_request_id TEXT, device_id TEXT, control_action TEXT,
+                    decision_source TEXT
+                );
+                CREATE TABLE IF NOT EXISTS control_requests (
+                    request_id TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    executed_at TEXT,
+                    decision_source TEXT,
+                    failure_reason TEXT,
+                    previous_state TEXT,
+                    resulting_state TEXT
                 );
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -101,8 +148,16 @@ class SimulatorStore:
             station_count = db.execute("SELECT COUNT(*) FROM stations").fetchone()[0]
             if station_count == 0:
                 self._seed(db)
+            db.execute("INSERT OR IGNORE INTO settings VALUES ('control_request_sequence', '0')")
+            self._ensure_event_columns(db)
             db.commit()
             self._close(db)
+
+    def _ensure_event_columns(self, db: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(events)").fetchall()}
+        for column in ("control_request_id", "device_id", "control_action", "decision_source"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
 
     def _seed(self, db: sqlite3.Connection) -> None:
         db.execute(
@@ -130,12 +185,14 @@ class SimulatorStore:
             ),
         )
         db.execute("INSERT OR REPLACE INTO settings VALUES ('scenario', ?)", (Scenario.NORMAL.value,))
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('control_request_sequence', '0')")
 
     def reset(self, actor: str = "researcher") -> None:
         with self._lock:
             db = self._connect()
             db.execute("DELETE FROM events")
             db.execute("DELETE FROM alarms")
+            db.execute("DELETE FROM control_requests")
             db.execute("DELETE FROM devices")
             db.execute("DELETE FROM stations")
             db.execute("DELETE FROM settings")
@@ -161,14 +218,17 @@ class SimulatorStore:
 
     def _device_row(self, device_id: str) -> sqlite3.Row | None:
         db = self._connect()
-        row = db.execute(
+        row = self._device_row_db(db, device_id)
+        self._close(db)
+        return row
+
+    def _device_row_db(self, db: sqlite3.Connection, device_id: str) -> sqlite3.Row | None:
+        return db.execute(
             """SELECT d.*, s.name AS station_name
                FROM devices d JOIN stations s ON s.id=d.station_id
                WHERE d.id=? OR d.serial_number=?""",
             (device_id, device_id),
         ).fetchone()
-        self._close(db)
-        return row
 
     def telemetry(self, device_id: str) -> Telemetry:
         row = self._device_row(device_id)
@@ -298,38 +358,402 @@ class SimulatorStore:
             result.append(MpptPoint(voltage=voltage, current=round(current, 2), power_kw=round(voltage * current / 1000, 2)))
         return result
 
-    def _set_device_state(self, device_id: str, state: DeviceState) -> None:
-        db = self._connect()
+    def _set_device_state_db(self, db: sqlite3.Connection, device_id: str, state: DeviceState) -> None:
         rapid = 1 if state == DeviceState.RAPID_SHUTDOWN else 0
         db.execute("UPDATE devices SET status=?, rapid_shutdown=? WHERE id=?", (state.value, rapid, device_id))
-        db.commit()
-        self._close(db)
 
-    def command(self, device_id: str, action: str, actor: str = "web-user") -> Device:
+    def _execute_transition_db(
+        self,
+        db: sqlite3.Connection,
+        device_row: sqlite3.Row,
+        command: str,
+    ) -> tuple[DeviceState, DeviceState, str]:
+        previous = DeviceState(device_row["status"])
+        plan = plan_transition(command, previous)
+        for state in plan.states:
+            self._set_device_state_db(db, device_row["id"], state)
+            if self.transition_delay and state != plan.states[-1]:
+                time.sleep(self.transition_delay)
+        return previous, plan.states[-1], plan.action
+
+    def start_device(self, device_id: str, actor: str = "web-user") -> Device:
         with self._lock:
-            row = self._device_row(device_id)
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            row = self._device_row_db(db, device_id)
             if row is None:
+                db.rollback()
+                self._close(db)
                 raise KeyError(device_id)
             current = DeviceState(row["status"])
-            request_path = f"POST /api/devices/{row['id']}/{action}"
             try:
-                plan = plan_transition(action, current)
+                previous, resulting, event_action = self._execute_transition_db(db, row, "start")
             except IllegalTransition as exc:
-                self.log_event(
-                    actor, f"DEVICE_{action.upper().replace('-', '_')}", row["serial_number"], request_path,
+                self._insert_event(
+                    db, actor, "DEVICE_START", row["serial_number"], f"POST /api/devices/{row['id']}/start",
                     current.value, None, current.value, "REJECTED", str(exc),
                 )
+                db.commit()
+                self._close(db)
                 raise
-            for state in plan.states:
-                self._set_device_state(row["id"], state)
-                if self.transition_delay and state != plan.states[-1]:
-                    time.sleep(self.transition_delay)
-            device = self.get_device(row["id"])
-            self.log_event(
-                actor, plan.action, row["serial_number"], request_path,
-                current.value, plan.requested_state.value, device.status.value, "SUCCESS",
+            self._insert_event(
+                db, actor, event_action, row["serial_number"], f"POST /api/devices/{row['id']}/start",
+                previous.value, DeviceState.RUNNING.value, resulting.value, "SUCCESS",
             )
-            return device
+            db.commit()
+            self._close(db)
+            return self.get_device(row["id"])
+
+    def reject_direct_protected_command(self, device_id: str, action: ControlAction, actor: str) -> None:
+        row = self._device_row(device_id)
+        if row is None:
+            raise KeyError(device_id)
+        current = DeviceState(row["status"])
+        self.log_event(
+            actor,
+            "DIRECT_CONTROL_REJECTED",
+            row["serial_number"],
+            f"POST /api/devices/{row['id']}/{CONTROL_ACTION_COMMANDS[action]}",
+            current.value,
+            action.value,
+            current.value,
+            "REJECTED",
+            "Approval gating is enabled; create a control request",
+            device_id=row["serial_number"],
+            control_action=action.value,
+        )
+
+    def _control_request_from_row(self, row: sqlite3.Row) -> ControlRequest:
+        return ControlRequest(**dict(row))
+
+    def create_control_request(
+        self,
+        device_id: str,
+        action: ControlAction,
+        actor: str = "web-user",
+    ) -> ControlRequest:
+        with self._lock:
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            device = self._device_row_db(db, device_id)
+            if device is None:
+                db.rollback()
+                self._close(db)
+                raise KeyError(device_id)
+
+            current = DeviceState(device["status"])
+            command = CONTROL_ACTION_COMMANDS[action]
+            try:
+                plan_transition(command, current)
+            except IllegalTransition:
+                db.rollback()
+                self._close(db)
+                raise
+
+            sequence = int(db.execute(
+                "SELECT value FROM settings WHERE key='control_request_sequence'"
+            ).fetchone()["value"]) + 1
+            request_id = f"CR-{sequence:06d}"
+            created = utc_datetime()
+            created_at = format_utc(created)
+            expires_at = format_utc(created + timedelta(seconds=self.control_request_ttl_seconds))
+            db.execute(
+                "UPDATE settings SET value=? WHERE key='control_request_sequence'",
+                (str(sequence),),
+            )
+            db.execute(
+                """INSERT INTO control_requests
+                   (request_id, device_id, action, status, created_at, expires_at,
+                    previous_state, resulting_state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    request_id,
+                    device["serial_number"],
+                    action.value,
+                    ControlRequestStatus.PENDING.value,
+                    created_at,
+                    expires_at,
+                    current.value,
+                    current.value,
+                ),
+            )
+            self._insert_event(
+                db,
+                actor,
+                "CONTROL_REQUEST_CREATED",
+                request_id,
+                "POST /api/control/requests",
+                current.value,
+                action.value,
+                current.value,
+                "SUCCESS",
+                control_request_id=request_id,
+                device_id=device["serial_number"],
+                control_action=action.value,
+            )
+            row = db.execute("SELECT * FROM control_requests WHERE request_id=?", (request_id,)).fetchone()
+            db.commit()
+            self._close(db)
+            return self._control_request_from_row(row)
+
+    def _expire_pending_db(self, db: sqlite3.Connection, request_id: str | None = None) -> int:
+        query = "SELECT * FROM control_requests WHERE status=?"
+        params: list[str] = [ControlRequestStatus.PENDING.value]
+        if request_id is not None:
+            query += " AND request_id=?"
+            params.append(request_id)
+        rows = db.execute(query, params).fetchall()
+        now = utc_datetime()
+        now_text = format_utc(now)
+        expired = 0
+        for row in rows:
+            expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+            if expires_at > now:
+                continue
+            device = self._device_row_db(db, row["device_id"])
+            current = DeviceState(device["status"]) if device else None
+            db.execute(
+                """UPDATE control_requests
+                   SET status=?, decided_at=?, decision_source=?, failure_reason=?, resulting_state=?
+                   WHERE request_id=? AND status=?""",
+                (
+                    ControlRequestStatus.EXPIRED.value,
+                    now_text,
+                    "system-expiry",
+                    "Approval window expired",
+                    current.value if current else row["resulting_state"],
+                    row["request_id"],
+                    ControlRequestStatus.PENDING.value,
+                ),
+            )
+            self._insert_event(
+                db,
+                "system",
+                "CONTROL_REQUEST_EXPIRED",
+                row["request_id"],
+                f"POST /api/control/requests/{row['request_id']}/approve",
+                current.value if current else row["previous_state"],
+                row["action"],
+                current.value if current else row["resulting_state"],
+                "EXPIRED",
+                "Approval window expired",
+                control_request_id=row["request_id"],
+                device_id=row["device_id"],
+                control_action=row["action"],
+                decision_source="system-expiry",
+            )
+            expired += 1
+        return expired
+
+    def list_control_requests(self, pending_only: bool = False) -> list[ControlRequest]:
+        with self._lock:
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            self._expire_pending_db(db)
+            if pending_only:
+                rows = db.execute(
+                    "SELECT * FROM control_requests WHERE status=? ORDER BY request_id",
+                    (ControlRequestStatus.PENDING.value,),
+                ).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM control_requests ORDER BY request_id").fetchall()
+            db.commit()
+            self._close(db)
+            return [self._control_request_from_row(row) for row in rows]
+
+    def get_control_request(self, request_id: str) -> ControlRequest:
+        with self._lock:
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            self._expire_pending_db(db, request_id)
+            row = db.execute("SELECT * FROM control_requests WHERE request_id=?", (request_id,)).fetchone()
+            if row is None:
+                db.rollback()
+                self._close(db)
+                raise KeyError(request_id)
+            db.commit()
+            self._close(db)
+            return self._control_request_from_row(row)
+
+    def approve_control_request(self, request_id: str, decision_source: str) -> ControlRequest:
+        with self._lock:
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            self._expire_pending_db(db, request_id)
+            request_row = db.execute(
+                "SELECT * FROM control_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if request_row is None:
+                db.rollback()
+                self._close(db)
+                raise KeyError(request_id)
+            if request_row["status"] == ControlRequestStatus.EXPIRED.value:
+                db.commit()
+                self._close(db)
+                raise ControlRequestConflict(f"Control request {request_id} has expired")
+            if request_row["status"] != ControlRequestStatus.PENDING.value:
+                db.rollback()
+                self._close(db)
+                raise ControlRequestConflict(
+                    f"Control request {request_id} is {request_row['status']}, not PENDING"
+                )
+
+            device = self._device_row_db(db, request_row["device_id"])
+            if device is None:
+                db.rollback()
+                self._close(db)
+                raise KeyError(request_row["device_id"])
+            previous = DeviceState(device["status"])
+            decided_at = utc_now()
+            db.execute(
+                """UPDATE control_requests
+                   SET status=?, decided_at=?, decision_source=?
+                   WHERE request_id=?""",
+                (ControlRequestStatus.APPROVED.value, decided_at, decision_source, request_id),
+            )
+            self._insert_event(
+                db,
+                decision_source,
+                "CONTROL_REQUEST_APPROVED",
+                request_id,
+                f"POST /api/control/requests/{request_id}/approve",
+                previous.value,
+                request_row["action"],
+                previous.value,
+                "SUCCESS",
+                control_request_id=request_id,
+                device_id=request_row["device_id"],
+                control_action=request_row["action"],
+                decision_source=decision_source,
+            )
+
+            db.execute("SAVEPOINT control_execution")
+            try:
+                _, resulting, _ = self._execute_transition_db(
+                    db,
+                    device,
+                    CONTROL_ACTION_COMMANDS[ControlAction(request_row["action"])],
+                )
+                db.execute("RELEASE SAVEPOINT control_execution")
+            except Exception as exc:
+                db.execute("ROLLBACK TO SAVEPOINT control_execution")
+                db.execute("RELEASE SAVEPOINT control_execution")
+                db.execute(
+                    """UPDATE control_requests
+                       SET status=?, failure_reason=?, resulting_state=?
+                       WHERE request_id=?""",
+                    (ControlRequestStatus.FAILED.value, str(exc), previous.value, request_id),
+                )
+                self._insert_event(
+                    db,
+                    decision_source,
+                    "CONTROL_REQUEST_FAILED",
+                    request_id,
+                    f"POST /api/control/requests/{request_id}/approve",
+                    previous.value,
+                    request_row["action"],
+                    previous.value,
+                    "FAILED",
+                    str(exc),
+                    control_request_id=request_id,
+                    device_id=request_row["device_id"],
+                    control_action=request_row["action"],
+                    decision_source=decision_source,
+                )
+            else:
+                executed_at = utc_now()
+                db.execute(
+                    """UPDATE control_requests
+                       SET status=?, executed_at=?, resulting_state=?, failure_reason=NULL
+                       WHERE request_id=?""",
+                    (ControlRequestStatus.EXECUTED.value, executed_at, resulting.value, request_id),
+                )
+                self._insert_event(
+                    db,
+                    decision_source,
+                    "CONTROL_REQUEST_EXECUTED",
+                    request_id,
+                    f"POST /api/control/requests/{request_id}/approve",
+                    previous.value,
+                    request_row["action"],
+                    resulting.value,
+                    "SUCCESS",
+                    control_request_id=request_id,
+                    device_id=request_row["device_id"],
+                    control_action=request_row["action"],
+                    decision_source=decision_source,
+                )
+
+            updated = db.execute(
+                "SELECT * FROM control_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            db.commit()
+            self._close(db)
+            return self._control_request_from_row(updated)
+
+    def deny_control_request(self, request_id: str, decision_source: str) -> ControlRequest:
+        with self._lock:
+            db = self._connect()
+            db.execute("BEGIN IMMEDIATE")
+            self._expire_pending_db(db, request_id)
+            request_row = db.execute(
+                "SELECT * FROM control_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if request_row is None:
+                db.rollback()
+                self._close(db)
+                raise KeyError(request_id)
+            if request_row["status"] == ControlRequestStatus.EXPIRED.value:
+                db.commit()
+                self._close(db)
+                raise ControlRequestConflict(f"Control request {request_id} has expired")
+            if request_row["status"] != ControlRequestStatus.PENDING.value:
+                db.rollback()
+                self._close(db)
+                raise ControlRequestConflict(
+                    f"Control request {request_id} is {request_row['status']}, not PENDING"
+                )
+
+            device = self._device_row_db(db, request_row["device_id"])
+            current = DeviceState(device["status"]) if device else None
+            decided_at = utc_now()
+            db.execute(
+                """UPDATE control_requests
+                   SET status=?, decided_at=?, decision_source=?, resulting_state=?
+                   WHERE request_id=?""",
+                (
+                    ControlRequestStatus.DENIED.value,
+                    decided_at,
+                    decision_source,
+                    current.value if current else request_row["resulting_state"],
+                    request_id,
+                ),
+            )
+            self._insert_event(
+                db,
+                decision_source,
+                "CONTROL_REQUEST_DENIED",
+                request_id,
+                f"POST /api/control/requests/{request_id}/deny",
+                current.value if current else request_row["previous_state"],
+                request_row["action"],
+                current.value if current else request_row["resulting_state"],
+                "SUCCESS",
+                control_request_id=request_id,
+                device_id=request_row["device_id"],
+                control_action=request_row["action"],
+                decision_source=decision_source,
+            )
+            updated = db.execute(
+                "SELECT * FROM control_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            db.commit()
+            self._close(db)
+            return self._control_request_from_row(updated)
 
     def _recover_open_alarms(self, db: sqlite3.Connection) -> int:
         timestamp = utc_now()
@@ -441,17 +865,60 @@ class SimulatorStore:
         resulting_state: str | None,
         result: str,
         error_reason: str | None = None,
+        control_request_id: str | None = None,
+        device_id: str | None = None,
+        control_action: str | None = None,
+        decision_source: str | None = None,
     ) -> None:
         db = self._connect()
-        db.execute(
-            """INSERT INTO events
-               (timestamp, actor, action, target, http_request, previous_state,
-                requested_state, resulting_state, result, error_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (utc_now(), actor, action, target, http_request, previous_state, requested_state, resulting_state, result, error_reason),
+        self._insert_event(
+            db,
+            actor,
+            action,
+            target,
+            http_request,
+            previous_state,
+            requested_state,
+            resulting_state,
+            result,
+            error_reason,
+            control_request_id,
+            device_id,
+            control_action,
+            decision_source,
         )
         db.commit()
         self._close(db)
+
+    def _insert_event(
+        self,
+        db: sqlite3.Connection,
+        actor: str,
+        action: str,
+        target: str,
+        http_request: str,
+        previous_state: str | None,
+        requested_state: str | None,
+        resulting_state: str | None,
+        result: str,
+        error_reason: str | None = None,
+        control_request_id: str | None = None,
+        device_id: str | None = None,
+        control_action: str | None = None,
+        decision_source: str | None = None,
+    ) -> None:
+        db.execute(
+            """INSERT INTO events
+               (timestamp, actor, action, target, http_request, previous_state,
+                requested_state, resulting_state, result, error_reason,
+                control_request_id, device_id, control_action, decision_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                utc_now(), actor, action, target, http_request, previous_state,
+                requested_state, resulting_state, result, error_reason,
+                control_request_id, device_id, control_action, decision_source,
+            ),
+        )
 
     def events(self) -> list[AuditEvent]:
         db = self._connect()

@@ -36,6 +36,7 @@ boundary.
 
 - Explicit allow/deny state transitions
 - Audited successful and rejected operations
+- Persistent, expiring approval requests for protected controls
 - Actor attribution through `X-Actor`
 - Hidden-from-navigation administration endpoints
 - Deterministic reset and scenario setup
@@ -54,10 +55,12 @@ boundary.
 
 ## Useful assertions
 
-- A disallowed start/stop request returns 409 and creates a rejected audit event.
+- Direct stop, restart, and rapid-shutdown requests return 409 and cannot change
+  device state.
+- A protected UI action remains pending until a separate approval is persisted;
+  denial, expiry, and OpenClaw delivery failure leave the device unchanged.
 - Offline/fault/rapid-shutdown states report zero active power.
 - Grid-overvoltage reports a fault, occurring alarm, zero power, and 262 V.
 - Reset returns the baseline identifiers and removes earlier experiment events.
 - A browser agent cannot reach a real energy endpoint because none is configured
   or implemented.
-

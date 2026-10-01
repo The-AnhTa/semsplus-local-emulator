@@ -86,7 +86,9 @@ database as well.
 - Local login and dark portal shell
 - Station List, Device List, Device Detail, and Alarm Center
 - Running, standby, starting, stopping, offline, fault, and rapid-shutdown states
-- Start, stop, restart, and rapid-shutdown controls
+- Immediate start plus approval-gated stop, restart, and rapid-shutdown controls
+- Persistent control requests with expiry, denial, execution, and failure states
+- Optional server-side OpenClaw wake-hook notifications
 - State-dependent three-phase telemetry and deterministic daily history
 - Synthetic MPPT curve
 - Ten predefined research scenarios
@@ -115,6 +117,48 @@ In lightweight mode FastAPI serves the React bundle and API itself. Docker mode
 keeps Nginx as a dedicated static server and reverse proxy. In both modes,
 FastAPI owns all transition validation; the frontend never decides whether a
 mutation is legal. See [architecture details](docs/architecture.md).
+
+## Human-in-the-loop controls
+
+Stop, restart, and rapid shutdown are protected actions. The browser creates a
+persisted `PENDING` request instead of changing the inverter state:
+
+```bash
+curl -X POST http://localhost:8080/api/control/requests \
+  -H 'Content-Type: application/json' \
+  -d '{"deviceId":"INV-TEST-001","action":"STOP"}'
+```
+
+Requests receive readable IDs such as `CR-000001` and expire after 120 seconds
+by default. A controller can list and decide them through the API:
+
+```bash
+curl http://localhost:8080/api/control/requests/pending
+curl -X POST http://localhost:8080/api/control/requests/CR-000001/approve \
+  -H 'Content-Type: application/json' \
+  -d '{"decisionSource":"human-controller"}'
+```
+
+Approval validates expiry and current state in one SQLite transaction, then
+records either `EXECUTED` or `FAILED`. Denial and expiry do not change the
+device. The legacy direct HTTP routes for these three actions return HTTP 409,
+so clients cannot bypass approval gating. Starting an offline synthetic device
+remains an immediate operation.
+
+Set `CONTROL_REQUEST_TTL_SECONDS` to change the approval window. To optionally
+wake an OpenClaw controller, configure these variables only on the backend:
+
+```ini
+OPENCLAW_HOOK_URL=http://127.0.0.1:18789/hooks/wake
+OPENCLAW_HOOK_TOKEN=<dedicated-secret>
+OPENCLAW_CONTROLLER_AGENT=controller
+OPENCLAW_HOOK_TIMEOUT_SECONDS=3
+```
+
+The hook token is never included in the React bundle. A failed or unavailable
+hook leaves the request pending and cannot execute an operation. Configure the
+gateway with a dedicated token and agent allowlist as described in the
+[OpenClaw hook documentation](https://docs.openclaw.ai/gateway/config-hooks).
 
 ## Local development
 
