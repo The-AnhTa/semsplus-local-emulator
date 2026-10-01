@@ -1,6 +1,17 @@
 import type { DeviceState } from "./types";
 
+const DEVICE_STATE_LABELS: Record<DeviceState, string> = {
+  RUNNING: "Running",
+  STANDBY: "Standby",
+  STARTING: "Starting",
+  STOPPING: "Stopping",
+  OFFLINE: "Offline",
+  FAULT: "Fault",
+  RAPID_SHUTDOWN: "Rapid Shutdown",
+};
+
 export function humanizeState(state: DeviceState | string): string {
+  if (state in DEVICE_STATE_LABELS) return DEVICE_STATE_LABELS[state as DeviceState];
   return state.toLowerCase().split("_").map((word) => word[0].toUpperCase() + word.slice(1)).join(" ");
 }
 
@@ -14,4 +25,3 @@ export function stateTone(state: DeviceState | string): "success" | "warning" | 
 export function formatNumber(value: number, decimals = 2): string {
   return new Intl.NumberFormat("en-AU", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }).format(value);
 }
-

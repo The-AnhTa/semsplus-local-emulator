@@ -81,6 +81,26 @@ export function DeviceDetailPage() {
     finally { setActing(""); }
   };
 
+  const refreshAfterExecution = useCallback(async () => {
+    try {
+      const nextDevice = await api.device(deviceId);
+      setDevice(nextDevice);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to refresh device state");
+      return;
+    }
+
+    const [nextTelemetry, nextHistory] = await Promise.allSettled([
+      api.telemetry(deviceId),
+      api.history(deviceId, date),
+    ]);
+    if (nextTelemetry.status === "fulfilled") setTelemetry(nextTelemetry.value);
+    if (nextHistory.status === "fulfilled") setHistory(nextHistory.value);
+    if (nextTelemetry.status === "rejected" || nextHistory.status === "rejected") {
+      setError("Device state refreshed, but some monitoring data could not be refreshed.");
+    }
+  }, [deviceId, date]);
+
   useEffect(() => {
     if (!controlRequest || !["PENDING", "APPROVED"].includes(controlRequest.status)) return;
     let active = true;
@@ -91,7 +111,7 @@ export function DeviceDetailPage() {
         if (updated.status === "EXECUTED") {
           setMessage(`Approval request ${updated.requestId} executed.\nDevice state: ${updated.resultingState?.toLowerCase().replace("_", " ")}.`);
           setControlRequest(updated);
-          await load();
+          await refreshAfterExecution();
         } else if (updated.status === "DENIED") {
           setControlRequest(updated);
           setMessage(`Approval request ${updated.requestId} was denied.\nThe device was not changed.`);
@@ -110,7 +130,7 @@ export function DeviceDetailPage() {
     };
     const interval = window.setInterval(() => { void poll(); }, 1000);
     return () => { active = false; window.clearInterval(interval); };
-  }, [controlRequest?.requestId, controlRequest?.status, load]);
+  }, [controlRequest?.requestId, controlRequest?.status, refreshAfterExecution]);
   const phases = useMemo(() => telemetry ? [
     ["Phase A", telemetry.phaseAVoltage, telemetry.phaseACurrent],
     ["Phase B", telemetry.phaseBVoltage, telemetry.phaseBCurrent],
@@ -126,7 +146,7 @@ export function DeviceDetailPage() {
       <div className="detail-grid">
         <section className="device-hero"><div className="simulation-label"><i/> LOCAL SIMULATION</div><InverterIllustration active={device.status === "RUNNING"}/><div className="common-controls"><div className="section-title"><span>Common controls</span><small>All actions affect synthetic state only</small></div><div className="control-cards"><button onClick={() => setDrawer(true)} data-testid="open-controls"><span><Icon name="controls" size={30}/></span><strong>Device Start / Stop</strong><small>Start, stop, restart or isolate</small></button><button onClick={() => setMessage("General settings are read-only in this research build.")}><span>⚙</span><strong>General Settings</strong><small>View simulator configuration</small></button></div><button className="more-control" onClick={() => setDrawer(true)}>More control <Icon name="arrow" size={15}/></button></div></section>
         <section className="detail-data">
-          <div className="operating panel-inner"><div className="section-title"><span><i className="section-dot"/> Operating data</span><small>Updated {new Date(telemetry.timestamp).toLocaleTimeString("en-AU")}</small></div><div className="metric-grid"><article><span>Active power</span><strong>{formatNumber(telemetry.activePowerKw)} <small>kW</small></strong></article><article><span>Reactive power</span><strong>{formatNumber(telemetry.reactivePowerKvar)} <small>kvar</small></strong></article><article><span>Power factor</span><strong>{formatNumber(telemetry.powerFactor)}</strong></article><article><span>AC frequency</span><strong>{formatNumber(telemetry.acFrequencyHz)} <small>Hz</small></strong></article></div><div className="phase-table"><div className="phase-head"><span>Phase</span><span>Voltage</span><span>Current</span><span>Frequency</span></div>{phases.map(([name, voltage, current]) => <div key={String(name)}><strong>{name}</strong><span>{formatNumber(Number(voltage), 1)} V</span><span>{formatNumber(Number(current))} A</span><span>{formatNumber(telemetry.acFrequencyHz)} Hz</span></div>)}</div></div>
+          <div className="operating panel-inner"><div className="section-title"><span><i className="section-dot"/> Operating data</span><small>Updated {new Date(telemetry.timestamp).toLocaleTimeString("en-AU")}</small></div><div className="metric-grid"><article data-testid="active-power"><span>Active power</span><strong>{formatNumber(telemetry.activePowerKw)} <small>kW</small></strong></article><article><span>Reactive power</span><strong>{formatNumber(telemetry.reactivePowerKvar)} <small>kvar</small></strong></article><article><span>Power factor</span><strong>{formatNumber(telemetry.powerFactor)}</strong></article><article><span>AC frequency</span><strong>{formatNumber(telemetry.acFrequencyHz)} <small>Hz</small></strong></article></div><div className="phase-table"><div className="phase-head"><span>Phase</span><span>Voltage</span><span>Current</span><span>Frequency</span></div>{phases.map(([name, voltage, current]) => <div key={String(name)}><strong>{name}</strong><span>{formatNumber(Number(voltage), 1)} V</span><span>{formatNumber(Number(current))} A</span><span>{formatNumber(telemetry.acFrequencyHz)} Hz</span></div>)}</div></div>
           <div className="monitoring panel-inner"><div className="monitor-toolbar"><div className="segmented"><button className={tab === "monitoring" ? "active" : ""} onClick={() => setTab("monitoring")}>Operation Monitoring</button><button className={tab === "mppt" ? "active" : ""} onClick={() => setTab("mppt")}>MPPT Curve</button></div>{tab === "monitoring" && <input aria-label="Monitoring date" type="date" value={date} onChange={(event) => setDate(event.target.value)} data-testid="history-date"/>}</div><div className="chart-wrap"><LineChart points={tab === "monitoring" ? history : mppt} keyName={tab === "monitoring" ? "activePowerKw" : "powerKw"} color={tab === "monitoring" ? "#f2b84b" : "#5ad5b2"}/><div className="chart-legend"><i style={{background: tab === "monitoring" ? "#f2b84b" : "#5ad5b2"}}/>{tab === "monitoring" ? "Active power (kW)" : "MPPT power (kW)"}</div></div></div>
         </section>
       </div>
