@@ -95,7 +95,9 @@ observes `EXECUTED`.
 
 OpenClaw integration is best-effort and one-way. After committing the request,
 FastAPI runs `openclaw agent` with an argument list, `shell=False`, captured
-output, and a short timeout. It targets the `controller` agent and
+output, and a 60-second timeout. On Windows it constructs the installed
+portable Node and `openclaw.mjs` paths from `Path.home()` and invokes those
+directly instead of relying on the command wrapper. It targets the `controller` agent and
 `agent:controller:main` session by default. CLI success and failure are both
 audited. A missing executable, timeout, or nonzero exit leaves the request
 `PENDING`; notification is never treated as approval and never receives

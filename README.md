@@ -153,7 +153,7 @@ committed. These optional overrides configure that backend process:
 OPENCLAW_CLI_PATH=openclaw
 OPENCLAW_CONTROLLER_AGENT=controller
 OPENCLAW_SESSION_KEY=agent:controller:main
-OPENCLAW_CLI_TIMEOUT_SECONDS=30
+OPENCLAW_CLI_TIMEOUT_SECONDS=60
 ```
 
 The command uses an argument list without a shell:
@@ -166,6 +166,16 @@ openclaw agent --agent controller --session-key agent:controller:main \
 A missing CLI, timeout, or nonzero exit is audited as a notification failure.
 It leaves the request pending and can never execute an operation. Notification
 success is also audited. No OpenClaw HTTP hook is used.
+
+On Windows, the backend does not rely on the `openclaw` command wrapper. It
+builds the current user's paths with `Path.home()` and invokes the portable
+Node runtime directly:
+
+```text
+%USERPROFILE%\AppData\Local\OpenClaw\deps\portable-node\node.exe
+  %USERPROFILE%\AppData\Local\OpenClaw\deps\portable-node\node_modules\openclaw\openclaw.mjs
+  agent --agent controller --session-key agent:controller:main --message "..."
+```
 
 ## Local development
 

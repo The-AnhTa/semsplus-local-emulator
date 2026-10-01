@@ -9,7 +9,7 @@ services:
       OPENCLAW_CLI_PATH: "${OPENCLAW_CLI_PATH:-openclaw}"
       OPENCLAW_CONTROLLER_AGENT: "${OPENCLAW_CONTROLLER_AGENT:-controller}"
       OPENCLAW_SESSION_KEY: "${OPENCLAW_SESSION_KEY:-agent:controller:main}"
-      OPENCLAW_CLI_TIMEOUT_SECONDS: "${OPENCLAW_CLI_TIMEOUT_SECONDS:-30}"
+      OPENCLAW_CLI_TIMEOUT_SECONDS: "${OPENCLAW_CLI_TIMEOUT_SECONDS:-60}"
     volumes:
       - cer-data:/data
     expose:
